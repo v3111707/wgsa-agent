@@ -1,0 +1,10 @@
+[Main]
+timePeriod = 1 //hours
+
+[RabbitMQ]
+host = "rabbithost"
+port = 5672
+vhost = "vhost"
+queue = "queuename"
+user = "username"
+pass = "******"
