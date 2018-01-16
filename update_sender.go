@@ -9,12 +9,15 @@ import (
 	"regexp"
 	"os"
 	"time"
+	"strings"
 	"strconv"
+	"golang.org/x/sys/windows/registry"
 )
 
 type update_struct struct{
 	KB     string  `json:"kb"`
 	Tittle string  `json:"tittle"`
+	Software string  `json:"software"`
 }
 
 type message_struct struct {
@@ -23,9 +26,25 @@ type message_struct struct {
 	Updates  []update_struct
 }
 
+func panicOnError(err error, msg string) {
+	if err != nil {
+		elog.Error(1, fmt.Sprintf("%s: %s", msg, err))
+		elog.Error(1, "Panicking")
+		panic(err)
+	}
+}
+
 func getUpdatesList(query string)  ([]update_struct, error) {
 	nil_slice := make([]update_struct, 0)
-
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		panicOnError(err,"Failed to open registry CurrentVersion")
+	}
+	ProductName , _, err := k.GetStringValue("ProductName")
+	if err != nil {
+		panicOnError(err, "Failed to open registry ProductName")
+	}
+	defer k.Close()
 	ole.CoInitialize(0)
 	defer ole.CoUninitialize()
 	unknown, err := oleutil.CreateObject("Microsoft.Update.Session")
@@ -78,7 +97,8 @@ func getUpdatesList(query string)  ([]update_struct, error) {
 		}
 		rule := item.ToIDispatch()
 		name := oleutil.MustGetProperty(rule, "Title").ToString()
-		updates = append(updates, update_struct{KB: r.FindString(name), Tittle: name})
+
+		updates = append(updates, update_struct{KB: strings.ToLower(r.FindString(name)), Tittle: name, Software: strings.ToLower(ProductName)})
 	}
 	return updates, nil
 }
@@ -91,7 +111,8 @@ func makeMessage() []byte{
 		return nil
 	}
 	raw_message := new(message_struct)
-	raw_message.Hostname, _ = os.Hostname()
+	hostname, _ := os.Hostname()
+	raw_message.Hostname = strings.ToLower(hostname)
 	start := time.Now()
 	raw_message.Time = start.Unix()
 	raw_message.Updates = updates_struct
@@ -101,11 +122,11 @@ func makeMessage() []byte{
 func sendtoRabbitMQ(message []byte, config rabbitConfig){
 	url := "amqp://" + config.User + ":" + config.Pass + "@" + config.Host + ":" + strconv.Itoa(config.Port) + "/" + config.Vhost
 	conn, err := amqp.Dial(url)
-	failOnError(err, "Failed to connect to RabbitMQ")
+	panicOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
 	ch, err := conn.Channel()
-	failOnError(err, "Failed to open a channel")
+	panicOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
 	q, err := ch.QueueDeclare(
@@ -116,7 +137,7 @@ func sendtoRabbitMQ(message []byte, config rabbitConfig){
 		false,
 		nil,
 	)
-	failOnError(err, "Failed to declare a queue")
+	panicOnError(err, "Failed to declare a queue")
 
 	body := message
 	err = ch.Publish(
@@ -128,11 +149,18 @@ func sendtoRabbitMQ(message []byte, config rabbitConfig){
 			ContentType: "text/plain",
 			Body:        []byte(body),
 		})
-	failOnError(err, "Failed to publish a message")
+	panicOnError(err, "Failed to publish a message")
 }
 
 
 func updateSender(config rabbitConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			elog.Info(1, "Recovered")
+		}
+	}()
+	elog.Info(1, "Get update list")
 	messageJson := makeMessage()
+	elog.Info(1, fmt.Sprintf("Sending: %s ", messageJson))
 	sendtoRabbitMQ(messageJson, config)
 }

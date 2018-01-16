@@ -12,6 +12,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+var elog debug.Log
+
 type tomlConfig struct {
 	Main mainConfig
 	RabbitMQ rabbitConfig
@@ -30,7 +32,6 @@ type rabbitConfig struct {
 	Pass string
 }
 
-var elog debug.Log
 type wgsaservice struct{}
 
 func usage(errmsg string) {
@@ -57,19 +58,13 @@ func startService(name string) error {
 
 func controlService(name string, c svc.Cmd, to svc.State) error {
 	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
+	failOnError(err, "Can't connect ")
 	defer m.Disconnect()
 	s, err := m.OpenService(name)
-	if err != nil {
-		return fmt.Errorf("could not access service: %v", err)
-	}
+	failOnError(err, "could not access service: ")
 	defer s.Close()
 	status, err := s.Control(c)
-	if err != nil {
-		return fmt.Errorf("could not send control=%d: %v", c, err)
-	}
+	failOnError(err, "could not send control: ")
 	timeout := time.Now().Add(10 * time.Second)
 	for status.State != to {
 		if timeout.Before(time.Now()) {
@@ -86,7 +81,9 @@ func controlService(name string, c svc.Cmd, to svc.State) error {
 
 func (m *wgsaservice) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	var config  tomlConfig
-	if _, err := toml.DecodeFile("wgsa-agent.toml", &config); err != nil {
+	configPath := os.Args[1]
+	elog.Info(1, fmt.Sprintf("Using %s ", configPath))
+	if _, err := toml.DecodeFile(configPath, &config); err != nil {
 		fmt.Println(err)
 		return
 	}
@@ -102,8 +99,9 @@ loop:
 		select {
 		case <-tick:
 			if(updateSenderNextRunTime.Before(time.Now())){
+				elog.Info(1, "Run updateSender")
 				go updateSender(config.RabbitMQ)
-				updateSenderNextRunTime = time.Now().Add(time.Duration(config.Main.TimePeriod) * time.Hour)
+				updateSenderNextRunTime = time.Now().Add(time.Duration(config.Main.TimePeriod) * time.Minute)
 			}
 		case c := <-r:
 			switch c.Cmd {
@@ -180,7 +178,7 @@ func exePath() (string, error) {
 	return "", err
 }
 
-func installService(name, desc string) error {
+func installService(name, desc, configPath string) error {
 	exepath, err := exePath()
 	if err != nil {
 		return err
@@ -195,7 +193,7 @@ func installService(name, desc string) error {
 		s.Close()
 		return fmt.Errorf("service %s already exists", name)
 	}
-	s, err = m.CreateService(name, exepath, mgr.Config{DisplayName: desc}, "is", "auto-started")
+	s, err = m.CreateService(name, exepath, mgr.Config{DisplayName: desc, StartType: 2}, configPath)
 	if err != nil {
 		return err
 	}
@@ -211,23 +209,15 @@ func installService(name, desc string) error {
 
 func removeService(name string) error {
 	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
+	failOnError(err, "")
 	defer m.Disconnect()
 	s, err := m.OpenService(name)
-	if err != nil {
-		return fmt.Errorf("service %s is not installed", name)
-	}
+	failOnError(err, "service is not installed")
 	defer s.Close()
 	err = s.Delete()
-	if err != nil {
-		return err
-	}
+	failOnError(err, "")
 	err = eventlog.Remove(name)
-	if err != nil {
-		return fmt.Errorf("RemoveEventLogSource() failed: %s", err)
-	}
+	failOnError(err, "RemoveEventLogSource() failed: ")
 	fmt.Println("Service removed successfully")
 	return nil
 }
